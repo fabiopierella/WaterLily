@@ -1,41 +1,26 @@
 using WaterLily
+using LinearAlgebra: norm2
+using StaticArrays
 include("TwoD_plots.jl")
 
-function TwoD_block_video(p,Re=250)
-    # Set simulation size & physical parameters
-    n,m = 2^p,2^(p-1)
-    U,L = [1.,0.],m/4.; ν=U[1]*L/Re
+function block(L=2^5;Re=250,U=1,amp=0,ϵ=0.5,thk=2ϵ+√2)
+    # Set viscosity
+    ν=U*L/Re
     @show L,ν
 
-    # Initialize uniform fields
-    u = zeros(n+2,m+2,2); BC!(u,U)
-    c = ones(n+2,m+2,2); BC!(c,[0. 0.])
-    ω₃ = zeros(n,m)
-
-    # Immerse a solid block over an x,y range
-    xr,yr = m÷2:m÷2+1,3m÷8+2:5m÷8+1;
-    u[xr[1]:xr[end]+1,yr,1] .= 0
-    c[xr[1]:xr[end]+1,yr,1] .= 0
-    c[xr,yr[1]:yr[end]+1,2] .= 0
-    x = [xr[1],xr[end],xr[end],xr[1],xr[1]]
-    y = [yr[1],yr[1],yr[end],yr[end],yr[1]]
-
-    # Initialize flow and Poisson system
-    a = Flow(u,c,U,ν=ν);
-    b = MultiLevelPoisson(a.μ₀)
-
-    # Evolve solution in time and plot to a gif
-    tprint,Δprint,nprint = -30.,0.25,100
-    gr(show = false, size=(780,360))
-    @time @gif for i ∈ 1:nprint
-        while tprint<0
-            mom_step!(a,b)
-            tprint += a.Δt[end]*U[1]/L
-        end
-        @inside ω₃[I]=WaterLily.curl(3,I,a.u)*L/U[1]
-        flood(ω₃,shift=(-0.5,-0.5),clims=(-16,16))
-        addbody(x,y)
-        tprint-=Δprint
+    # Create dynamic block geometry
+    function sdf(x,t)
+        y = x .- SVector(0.,clamp(x[2],-L/2,L/2))
+        norm2(y)-thk/2
     end
-    return a
+    function map(x,t)
+        α = amp*cos(t*U/L); R = @SMatrix [cos(α) sin(α); -sin(α) cos(α)]
+        R * (x.-SVector(3L+L*sin(t*U/L)+0.01,4L))
+    end
+    body = AutoBody(sdf,map)
+
+    Simulation((6L+2,6L+2),zeros(2),L;U,ν,body,ϵ)
 end
+# test() = @time sim_step!(block(),π,remeasure=true)
+# sim_gif!(block();duration=4π,step=π/16,remeasure=true)
+# sim_gif!(block(amp=π/4);duration=8π,step=π/16,remeasure=true,μbody=true,cfill=:Blues,legend=false,border=:none)

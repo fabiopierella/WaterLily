@@ -1,35 +1,47 @@
 @inline near(I::CartesianIndex,a=0) = (2I-2oneunit(I)):(2I-oneunit(I)-δ(a,I))
 
-@fastmath function restrictML(b::Array{Float64,m}) where m
-    N = ntuple(i-> i==m ? m-1 : 1+size(b,i)÷2, m)
-    a = zeros(N)
-    @inbounds for i ∈ 1:m-1, I ∈ inside(N[1:m-1])
-        a[I,i] = 0.5sum(b[J,i] for J ∈ near(I,i))
-    end
+function restrictML(b::AbstractArray{T}) where T
+    N,n = size_u(b)
+    a = zeros(T,map(i->1+i÷2,N)...,n)
+    restrictL!(a,b)
     Poisson(a)
 end
+@fastmath function restrictL!(a,b)
+    N,n = size_u(a)
+    @inbounds for i ∈ 1:n, I ∈ inside(N)
+        a[I,i] = 0.5sum(@inbounds(b[J,i]) for J ∈ near(I,i))
+    end
+end
 
-@fastmath restrict!(a::Array{Float64},b::Array{Float64}) = @inbounds @simd for I ∈ inside(a)
+@fastmath restrict!(a,b) = @inbounds @simd for I ∈ inside(a)
     a[I] = sum(@inbounds(b[J]) for J ∈ near(I))
 end
 
-prolongate!(a::Array{Float64},b::Array{Float64}) = @inbounds for I ∈ inside(b)
+prolongate!(a,b) = @inbounds for I ∈ inside(b)
     @simd for J ∈ near(I)
         a[J] = b[I]
 end;end
 
 @inline divisible(N) = mod(N,2)==0 && N>4
 
-struct MultiLevelPoisson{N,M} <: AbstractPoisson{N,M}
-    levels :: Vector{Poisson{N,M}}
-    function MultiLevelPoisson(L::Array{Float64,n}) where n
+struct MultiLevelPoisson{N,M,T} <: AbstractPoisson{N,M,T}
+    levels :: Vector{Poisson{N,M,T}}
+    n :: Vector{Int16}
+    function MultiLevelPoisson(L::AbstractArray{T,n}) where {T,n}
         levels = [Poisson(L)]
         while all(size(levels[end].x) .|> divisible)
             push!(levels,restrictML(levels[end].L))
         end
-        text = "MultiLevelPoisson requires size=a2ⁿ, where a<10, n>1"
-        @assert length(levels)>1 & all(size(levels[end].x).<10) text
-        new{n,n-1}(levels)
+        text = "MultiLevelPoisson requires size=a2ⁿ, where a<31, n>2"
+        @assert (length(levels)>2 && all(size(levels[end].x).<31)) text
+        new{n-1,n,T}(levels,[])
+    end
+end
+function update!(ml::MultiLevelPoisson,L)
+    update!(ml.levels[1],L)
+    for l ∈ 2:length(ml.levels)
+        restrictL!(ml.levels[l].L,ml.levels[l-1].L)
+        set_diag!(ml.levels[l])
     end
 end
 
@@ -49,8 +61,9 @@ end
 
 mult(ml::MultiLevelPoisson,x) = mult(ml.levels[1],x)
 
-function solve!(x::Array{Float64,m},ml::MultiLevelPoisson{n,m},b::Array{Float64,m};log=false,tol=1e-3,itmx=32) where {n,m}
+function solver!(x,ml::MultiLevelPoisson,b;log=false,tol=1e-3,itmx=32)
     p = ml.levels[1]
+    @assert size(p.x)==size(x)
     p.x .= x
     residual!(p,b); r₂ = L₂(p.r)
     log && (res = [r₂])
@@ -63,5 +76,6 @@ function solve!(x::Array{Float64,m},ml::MultiLevelPoisson{n,m},b::Array{Float64,
         nᵖ+=1
     end
     x .= p.x
-    return log ? res : nᵖ
+    push!(ml.n,nᵖ)
+    log && return res
 end

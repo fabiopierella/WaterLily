@@ -1,36 +1,21 @@
 using WaterLily
 using BenchmarkTools
+using LinearAlgebra: norm2
+using Profile
 
-function TwoD_block_test(p=7,N=[1,5000])
-    n,m = 2^p,2^(p-1); xr = m÷2:m÷2; yr = 3m÷8+2:5m÷8+1
-    u = zeros(n+2,m+2,2); BC!(u,[1.,0.])
-    c = ones(n+2,m+2,2); BC!(c,[0. 0.])
-    c[first(xr):last(xr)+1,yr,1] .= 0
-    c[xr,first(yr):last(yr)+1,2] .= 0
-    a = Flow(u,c,[1.,0.],Δt=0.1,ν=0.01)
-    b = MultiLevelPoisson(c)
-    for n ∈ N
-        @show n
-        for i ∈ 1:n
-            mom_step!(a,b)
-        end
-        @btime mom_step!($a,$b)
-    end
-end
+radius = 8; Re = 250
+body = AutoBody((x,t)-> √sum(abs2,x .- 2radius) - radius)
+body_sim(T=Float64) = Simulation((6radius+2,4radius+2),[1.,0.],radius; body, ν=radius/Re,T)
 
-function TGVortex_test(p=7,N=[1,10])
-    L,U = 2^p,zeros(3)
-    u = [-sin((i-2)*π/L)*cos((j-1.5)*π/L)*cos((k-1.5)*π/L) for i∈1:L+2, j∈1:L+2, k∈1:L+2]
-    v = [ cos((i-1.5)*π/L)*sin((j-2)*π/L)*cos((k-1.5)*π/L) for i∈1:L+2, j∈1:L+2, k∈1:L+2]
-    u = cat(u,v,zeros(L+2,L+2,L+2),dims=4); BC!(u,U)
-    c = ones(L+2,L+2,L+2,3); BC!(c,U)
-    a = Flow(u,c,U,Δt=0.1,ν=0.01)
-    b = MultiLevelPoisson(c)
-    for n ∈ N
-        @show n
-        for i ∈ 1:n
-            mom_step!(a,b)
-        end
-        @btime mom_step!($a,$b)
-    end
+L = 2^5
+function uλ(i,vx)
+    x,y,z = @. (vx-1.5)*π/L              # scaled coordinates
+    i==1 && return -sin(x)*cos(y)*cos(z) # u_x
+    i==2 && return  cos(x)*sin(y)*cos(z) # u_y
+    return 0.                            # u_z
 end
+vort_sim(T=Float64) = Simulation((L+2,L+2,L+2),zeros(3),L;uλ,ν=L/Re,U=1.,T)
+
+benchmark_step() = @benchmark mom_step!($sim.flow,$sim.pois)
+benchmark_vort() = @benchmark sim_step!(sim,10) setup=(sim=vort_sim()) seconds=30
+benchmark_body() = @benchmark sim_step!(sim,10) setup=(sim=body_sim())

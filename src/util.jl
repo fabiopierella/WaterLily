@@ -4,9 +4,13 @@
 
 @inline CR(a...) = CartesianIndices(a...)
 @inline inside(M::NTuple{N,Int}) where {N} = CR(ntuple(i-> 2:M[i]-1,N))
-@inline inside(a::Array; reverse::Bool=false) =
+@inline inside(a; reverse::Bool=false) =
         reverse ? Iterators.reverse(inside(size(a))) : inside(size(a))
-@inline inside_u(N::NTuple{n,T}) where {n,T} = CR(ntuple(i->2:N[i],n-1))
+function inside_u(N::NTuple{n,Int},j::Int)::CartesianIndices{n} where n
+    CartesianIndices(ntuple( i-> i==j ? (3:N[i]-1) : (2:N[i]), n))
+end
+splitn(n) = Base.front(n),n[end]
+size_u(u) = splitn(size(u))
 
 import Base.mapreduce
 @fastmath function mapreduce(f,op,R::CartesianIndices;init=0.)
@@ -16,7 +20,7 @@ import Base.mapreduce
     end
     val
 end
-L₂(a::Array{Float64}) = mapreduce(I->@inbounds(abs2(a[I])),+,inside(a))
+L₂(a) = mapreduce(I->@inbounds(abs2(a[I])),+,inside(a))
 
 macro inside(ex)
     @assert ex.head==:(=)
@@ -28,60 +32,68 @@ macro inside(ex)
     end |> esc
 end
 
-@fastmath function median(a,b,c)
-    x = a-b
-    if x*(b-c) ≥ 0
-        return b
-    elseif x*(a-c) > 0
-        return c
+function median(a,b,c)
+    if a>b
+        b>=c && return b
+        a>c && return c
     else
-        return a
+        b<=c && return b
+        a<c && return c
+    end
+    return a
+end
+
+"""
+    apply!(f, c)
+
+Apply a vector function `f(i,x)` to the faces of a uniform staggered array `c`.
+"""
+function apply!(f,c)
+    N = size(c)
+    for b ∈ 1:N[end]
+        @simd for I ∈ CR(N[1:end-1])
+            x = collect(Float16, I.I) # location at cell center
+            x[b] -= 0.5               # location at face
+            @inbounds c[I,b] = f(b,x) # apply function to location
+        end
     end
 end
 
-function BC!(a::Array{T,4},A,f=1) where T
-    for k∈1:size(a,3), j∈1:size(a,2)
-        a[1,j,k,1] = a[2,j,k,1] = a[size(a,1),j,k,1] = f*A[1]
-        a[1,j,k,2] = a[2,j,k,2]; a[size(a,1),j,k,2] = a[size(a,1)-1,j,k,2]
-        a[1,j,k,3] = a[2,j,k,3]; a[size(a,1),j,k,3] = a[size(a,1)-1,j,k,3]
-    end
-    for k∈1:size(a,3), i∈1:size(a,1)
-        a[i,1,k,2] = a[i,2,k,2] = a[i,size(a,2),k,2] = f*A[2]
-        a[i,1,k,1] = a[i,2,k,1]; a[i,size(a,2),k,1] = a[i,size(a,2)-1,k,1]
-        a[i,1,k,3] = a[i,2,k,3]; a[i,size(a,2),k,3] = a[i,size(a,2)-1,k,3]
-    end
-    for j∈1:size(a,2), i∈1:size(a,1)
-        a[i,j,1,3] = a[i,j,2,3] = a[i,j,size(a,3),3] = f*A[3]
-        a[i,j,1,1] = a[i,j,2,1]; a[i,j,size(a,3),1] = a[i,j,size(a,3)-1,1]
-        a[i,j,1,2] = a[i,j,2,2]; a[i,j,size(a,3),2] = a[i,j,size(a,3)-1,2]
+"""
+    slice(N,s,dims) -> R
+
+Return `CartesianIndices` slicing through an array of size `N`.
+"""
+function slice(N::NTuple{n,Int},s::Int,dims::Int,low::Int=1)::CartesianIndices{n} where n
+    CartesianIndices(ntuple( i-> i==dims ? (s:s) : (low:N[i]), n))
+end
+
+function BC!(a::AbstractArray{T,m},A,f=1) where {T,m}
+    n = m-1
+    N = ntuple(i -> size(a,i), n)
+    for j ∈ 1:n, i ∈ 1:n
+        if i==j # Inline direction
+            for s ∈ (1,2,N[j]); @simd for I ∈ slice(N,s,j)
+                a[I,i] = f*A[i] # Dirichlet
+            end; end
+        else    # Perpendicular directions
+            @simd for I ∈ slice(N,1,j)
+                a[I,i] = a[I+δ(j,I),i] # Neumann
+            end
+            @simd for I ∈ slice(N,N[j],j)
+                a[I,i] = a[I-δ(j,I),i] # Neumann
+            end
+        end
     end
 end
-function BC!(a::Array{T,3},A,f=1) where T
-    for j∈1:size(a,2)
-        a[1,j,1] = a[2,j,1] = a[size(a,1),j,1] = f*A[1]
-        a[1,j,2] = a[2,j,2]; a[size(a,1),j,2] = a[size(a,1)-1,j,2]
-    end
-    for i∈1:size(a,1)
-        a[i,1,2] = a[i,2,2] = a[i,size(a,2),2] = f*A[2]
-        a[i,1,1] = a[i,2,1]; a[i,size(a,2),1] = a[i,size(a,2)-1,1]
-    end
-end
-function BC!(a::Array{T,3}) where T
-    for k∈1:size(a,3), j∈1:size(a,2)
-        a[1,j,k] = a[2,j,k]; a[size(a,1),j,k] = a[size(a,1)-1,j,k]
-    end
-    for k∈1:size(a,3), i∈1:size(a,1)
-        a[i,1,k] = a[i,2,k]; a[i,size(a,2),k] = a[i,size(a,2)-1,k]
-    end
-    for j∈1:size(a,2), i∈1:size(a,1)
-        a[i,j,1] = a[i,j,2]; a[i,j,size(a,3)] = a[i,j,size(a,3)-1]
-    end
-end
-function BC!(a::Array{T,2}) where T
-    for j∈1:size(a,2)
-        a[1,j] = a[2,j]; a[size(a,1),j] = a[size(a,1)-1,j]
-    end
-    for i∈1:size(a,1)
-        a[i,1] = a[i,2]; a[i,size(a,2)] = a[i,size(a,2)-1]
+function BC!(a::AbstractArray{T,n}) where {T,n}
+    N = size(a)
+    for j ∈ 1:n
+        @simd for I ∈ slice(N,1,j)
+            a[I] = a[I+δ(j,I)] # Neumann
+        end
+        @simd for I ∈ slice(N,N[j],j)
+            a[I] = a[I-δ(j,I)] # Neumann
+        end
     end
 end
